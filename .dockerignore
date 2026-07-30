@@ -1,0 +1,38 @@
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+.devcontainer/
+
+# Jupyter notebooks (large files)
+*.ipynb
+
+# Data files
+*.csv
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Docs
+README.md
+
+# Agents config
+.agents/
+.gemini/
