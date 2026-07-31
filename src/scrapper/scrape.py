@@ -9,6 +9,7 @@ import pandas as pd
 import os, sys
 import time
 import random
+import requests as http_requests
 from selenium.webdriver.chrome.options import Options
 from urllib.parse import quote
 
@@ -17,6 +18,21 @@ class ScrapeReviews:
     def __init__(self,
                  product_name:str,
                  no_of_products:int):
+        
+        self.product_name = product_name
+        self.no_of_products = no_of_products
+        self.scraper_api_key = os.environ.get("SCRAPER_API_KEY")
+        self.driver = None
+        
+        # If no ScraperAPI key, use Selenium
+        if not self.scraper_api_key:
+            self._init_selenium()
+            print("[INFO] Mode: Selenium (local)")
+        else:
+            print("[INFO] Mode: ScraperAPI (cloud-friendly)")
+
+    def _init_selenium(self):
+        """Initialize Selenium Chrome driver for local scraping"""
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -28,28 +44,16 @@ class ScrapeReviews:
         options.add_argument('--disable-software-rasterizer')
         options.add_argument('--disable-blink-features=AutomationControlled')
         
-        # Randomize user-agent to avoid detection
         user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         ]
         options.add_argument(f'--user-agent={random.choice(user_agents)}')
-
-        # Exclude automation-related switches
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
 
-        # --- Proxy Support (ScraperAPI) ---
-        # Set SCRAPER_API_KEY env var on Render to enable proxy routing
-        scraper_api_key = os.environ.get("SCRAPER_API_KEY")
-        if scraper_api_key:
-            proxy = f"http://scraperapi:{scraper_api_key}@proxy-server.scraperapi.com:8001"
-            options.add_argument(f'--proxy-server={proxy}')
-            print(f"[INFO] Using ScraperAPI proxy for anti-bot bypass")
-
-        # --- Auto-detect Chrome/Chromium binary ---
+        # Auto-detect Chrome/Chromium binary
         chrome_bin = os.environ.get("CHROME_BIN")
         if not chrome_bin:
             for path in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]:
@@ -60,15 +64,11 @@ class ScrapeReviews:
         if chrome_bin:
             print(f"[INFO] Using Chrome binary: {chrome_bin}")
             options.binary_location = chrome_bin
-        else:
-            print("[INFO] No custom Chrome binary found, using default Chrome")
 
-        # Start Chrome
         print("[INFO] Starting Chrome driver...")
         self.driver = webdriver.Chrome(options=options)
-        print("[INFO] Chrome driver started successfully!")
+        print("[INFO] Chrome driver started!")
 
-        # Apply selenium-stealth to avoid bot detection
         stealth(self.driver,
                 languages=["en-US", "en"],
                 vendor="Google Inc.",
@@ -77,41 +77,85 @@ class ScrapeReviews:
                 renderer="Intel Iris OpenGL Engine",
                 fix_hairline=True,
         )
-        print("[INFO] Stealth mode applied!")
 
         self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
         })
 
-        self.product_name = product_name
-        self.no_of_products = no_of_products
+    def _fetch_page(self, url):
+        """Fetch page HTML — uses ScraperAPI if available, else Selenium"""
+        if self.scraper_api_key:
+            # Use ScraperAPI with JavaScript rendering
+            api_url = "http://api.scraperapi.com"
+            params = {
+                "api_key": self.scraper_api_key,
+                "url": url,
+                "render": "true",
+                "country_code": "in",  # India for Myntra
+            }
+            print(f"[INFO] Fetching via ScraperAPI: {url}")
+            response = http_requests.get(api_url, params=params, timeout=90)
+            if response.status_code == 200:
+                print(f"[DEBUG] ScraperAPI response: {len(response.text)} chars")
+                return response.text
+            else:
+                print(f"[ERROR] ScraperAPI returned status {response.status_code}: {response.text[:200]}")
+                return ""
+        else:
+            # Use Selenium
+            print(f"[INFO] Fetching via Selenium: {url}")
+            self.driver.get(url)
+            self._random_delay(4, 7)
+            page_source = self.driver.page_source
+            print(f"[DEBUG] Page source: {len(page_source)} chars")
+            return page_source
+
+    def _fetch_page_with_scroll(self, url, max_scrolls=10):
+        """Fetch page with scrolling — uses ScraperAPI or Selenium"""
+        if self.scraper_api_key:
+            # ScraperAPI renders JS but can't scroll; we fetch the page as-is
+            # Still gets the initial reviews that are loaded
+            return self._fetch_page(url)
+        else:
+            self.driver.get(url)
+            self._scroll_to_load_reviews(max_scrolls)
+            return self.driver.page_source
 
     def _random_delay(self, min_sec=2, max_sec=5):
         """Add random delay to mimic human behavior"""
         time.sleep(random.uniform(min_sec, max_sec))
 
+    def _scroll_to_load_reviews(self, max_scrolls=10):
+        """Scroll page in Selenium to load more reviews"""
+        try:
+            last_height = self.driver.execute_script("return document.body.scrollHeight")
+            scroll_count = 0
+            while scroll_count < max_scrolls:
+                self.driver.execute_script("window.scrollBy(0, 1000);")
+                self._random_delay(2, 4)
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+                scroll_count += 1
+        except Exception as e:
+            print(f"Scroll interrupted (okay, continuing): {e}")
+
     def scrape_product_urls(self, product_name):
         try:
-            search_string = product_name.replace(" ","-")
-
+            search_string = product_name.replace(" ", "-")
             encoded_query = quote(search_string)
             url = f"https://www.myntra.com/{search_string}?rawQuery={encoded_query}"
-            print(f"[INFO] Navigating to: {url}")
             
-            self.driver.get(url)
-            self._random_delay(4, 7)  # Random wait to mimic human
+            page_source = self._fetch_page(url)
             
-            myntra_text = self.driver.page_source
-            print(f"[DEBUG] Page source length: {len(myntra_text)} chars")
-            
-            myntra_html = bs(myntra_text, "html.parser")
+            myntra_html = bs(page_source, "html.parser")
             pclass = myntra_html.findAll("ul", {"class": "results-base"})
             print(f"[DEBUG] Found {len(pclass)} result containers")
 
             product_urls = []
             for i in pclass:
                 href = i.find_all("a", href=True)
-
                 for product_no in range(len(href)):
                     t = href[product_no]["href"]
                     product_urls.append(t)
@@ -126,11 +170,9 @@ class ScrapeReviews:
         try:
             productLink = "https://www.myntra.com/" + product_link
             print(f"[INFO] Extracting reviews from: {productLink}")
-            self.driver.get(productLink)
-            self._random_delay(3, 6)
             
-            prodRes = self.driver.page_source
-            prodRes_html = bs(prodRes, "html.parser")
+            page_source = self._fetch_page(productLink)
+            prodRes_html = bs(page_source, "html.parser")
             title_h = prodRes_html.findAll("title")
 
             self.product_title = title_h[0].text
@@ -153,37 +195,13 @@ class ScrapeReviews:
             return product_reviews
         except Exception as e:
             raise CustomException(e, sys)
-        
-    def scroll_to_load_reviews(self, max_scrolls=10):
-        try:
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
-            
-            scroll_count = 0
-            while scroll_count < max_scrolls:
-                self.driver.execute_script("window.scrollBy(0, 1000);")
-                self._random_delay(2, 4)
-                
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
-                
-                if new_height == last_height:
-                    break
-                
-                last_height = new_height
-                scroll_count += 1
-        except Exception as e:
-            print(f"Scroll interrupted (this is okay, continuing with loaded reviews): {e}")
-
-
 
     def extract_products(self, product_reviews: list):
         try:
             t2 = product_reviews["href"]
             Review_link = "https://www.myntra.com" + t2
-            self.driver.get(Review_link)
             
-            self.scroll_to_load_reviews()
-            
-            review_page = self.driver.page_source
+            review_page = self._fetch_page_with_scroll(Review_link)
 
             review_html = bs(review_page, "html.parser")
             review = review_html.findAll(
@@ -254,10 +272,8 @@ class ScrapeReviews:
         except Exception as e:
             raise CustomException(e, sys)
         
-    
     def skip_products(self, search_string, no_of_products, skip_index):
         product_urls: list = self.scrape_product_urls(search_string, no_of_products + 1)
-
         product_urls.pop(skip_index)
 
     def get_review_data(self) -> pd.DataFrame:
@@ -265,14 +281,13 @@ class ScrapeReviews:
             product_urls = self.scrape_product_urls(product_name=self.product_name)
 
             if not product_urls:
-                self.driver.quit()
+                if self.driver:
+                    self.driver.quit()
                 print("[WARN] No products found for the given search query.")
                 return None
 
             product_details = []
-
             review_len = 0
-
 
             while review_len < self.no_of_products and review_len < len(product_urls):
                 product_url = product_urls[review_len]
@@ -281,23 +296,24 @@ class ScrapeReviews:
                 if review:
                     product_detail = self.extract_products(review)
                     product_details.append(product_detail)
-
                     review_len += 1
                 else:
                     product_urls.pop(review_len)
 
-            self.driver.quit()
+            if self.driver:
+                self.driver.quit()
 
             if not product_details:
                 print("[WARN] No review data collected from any product.")
                 return None
 
             data = pd.concat(product_details, axis=0)
-            
             data.to_csv("data.csv", index=False)
             
             print(f"[INFO] Total reviews scraped: {len(data)}")
             return data
 
         except Exception as e:
+            if self.driver:
+                self.driver.quit()
             raise CustomException(e, sys)
