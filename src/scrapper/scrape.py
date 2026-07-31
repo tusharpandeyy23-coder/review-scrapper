@@ -2,11 +2,13 @@ from flask import request
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium_stealth import stealth
 from src.exception import CustomException
 from bs4 import BeautifulSoup as bs
 import pandas as pd
 import os, sys
 import time
+import random
 from selenium.webdriver.chrome.options import Options
 from urllib.parse import quote
 
@@ -24,21 +26,59 @@ class ScrapeReviews:
         options.add_argument('--disable-extensions')
         options.add_argument('--remote-debugging-port=0')
         options.add_argument('--disable-software-rasterizer')
-        options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36')
         options.add_argument('--disable-blink-features=AutomationControlled')
         
-        # Use Chromium binary from env var if available (Docker/Render)
+        # Randomize user-agent to avoid detection
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ]
+        options.add_argument(f'--user-agent={random.choice(user_agents)}')
+
+        # Exclude automation-related switches
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+
+        # --- Proxy Support (ScraperAPI) ---
+        # Set SCRAPER_API_KEY env var on Render to enable proxy routing
+        scraper_api_key = os.environ.get("SCRAPER_API_KEY")
+        if scraper_api_key:
+            proxy = f"http://scraperapi:{scraper_api_key}@proxy-server.scraperapi.com:8001"
+            options.add_argument(f'--proxy-server={proxy}')
+            print(f"[INFO] Using ScraperAPI proxy for anti-bot bypass")
+
+        # --- Auto-detect Chrome/Chromium binary ---
         chrome_bin = os.environ.get("CHROME_BIN")
+        if not chrome_bin:
+            for path in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]:
+                if os.path.exists(path):
+                    chrome_bin = path
+                    break
+        
         if chrome_bin:
-            print(f"[INFO] Using Chrome binary from CHROME_BIN: {chrome_bin}")
+            print(f"[INFO] Using Chrome binary: {chrome_bin}")
             options.binary_location = chrome_bin
         else:
-            print("[INFO] CHROME_BIN not set, using default Chrome")
+            print("[INFO] No custom Chrome binary found, using default Chrome")
 
-        # Start a new Chrome browser session (auto-detects chromedriver)
+        # Start Chrome
         print("[INFO] Starting Chrome driver...")
         self.driver = webdriver.Chrome(options=options)
         print("[INFO] Chrome driver started successfully!")
+
+        # Apply selenium-stealth to avoid bot detection
+        stealth(self.driver,
+                languages=["en-US", "en"],
+                vendor="Google Inc.",
+                platform="Win32",
+                webgl_vendor="Intel Inc.",
+                renderer="Intel Iris OpenGL Engine",
+                fix_hairline=True,
+        )
+        print("[INFO] Stealth mode applied!")
+
         self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
         })
@@ -46,20 +86,27 @@ class ScrapeReviews:
         self.product_name = product_name
         self.no_of_products = no_of_products
 
+    def _random_delay(self, min_sec=2, max_sec=5):
+        """Add random delay to mimic human behavior"""
+        time.sleep(random.uniform(min_sec, max_sec))
+
     def scrape_product_urls(self, product_name):
         try:
             search_string = product_name.replace(" ","-")
-            # no_of_products = int(self.request.form['prod_no'])
 
             encoded_query = quote(search_string)
-            # Navigate to the URL
-            self.driver.get(
-                f"https://www.myntra.com/{search_string}?rawQuery={encoded_query}"
-            )
-            time.sleep(5)  # Wait for page to fully load
+            url = f"https://www.myntra.com/{search_string}?rawQuery={encoded_query}"
+            print(f"[INFO] Navigating to: {url}")
+            
+            self.driver.get(url)
+            self._random_delay(4, 7)  # Random wait to mimic human
+            
             myntra_text = self.driver.page_source
+            print(f"[DEBUG] Page source length: {len(myntra_text)} chars")
+            
             myntra_html = bs(myntra_text, "html.parser")
             pclass = myntra_html.findAll("ul", {"class": "results-base"})
+            print(f"[DEBUG] Found {len(pclass)} result containers")
 
             product_urls = []
             for i in pclass:
@@ -69,6 +116,7 @@ class ScrapeReviews:
                     t = href[product_no]["href"]
                     product_urls.append(t)
 
+            print(f"[INFO] Found {len(product_urls)} product URLs")
             return product_urls
 
         except Exception as e:
@@ -77,7 +125,10 @@ class ScrapeReviews:
     def extract_reviews(self, product_link):
         try:
             productLink = "https://www.myntra.com/" + product_link
+            print(f"[INFO] Extracting reviews from: {productLink}")
             self.driver.get(productLink)
+            self._random_delay(3, 6)
+            
             prodRes = self.driver.page_source
             prodRes_html = bs(prodRes, "html.parser")
             title_h = prodRes_html.findAll("title")
@@ -97,6 +148,7 @@ class ScrapeReviews:
             )
 
             if not product_reviews:
+                print(f"[WARN] No review link found for: {self.product_title}")
                 return None
             return product_reviews
         except Exception as e:
@@ -104,24 +156,18 @@ class ScrapeReviews:
         
     def scroll_to_load_reviews(self, max_scrolls=10):
         try:
-            # Get the initial height of the page
             last_height = self.driver.execute_script("return document.body.scrollHeight")
             
             scroll_count = 0
-            # Scroll in smaller increments, waiting between scrolls
             while scroll_count < max_scrolls:
-                # Scroll down by a small amount
                 self.driver.execute_script("window.scrollBy(0, 1000);")
-                time.sleep(3)  # Adjust this delay if needed
+                self._random_delay(2, 4)
                 
-                # Calculate the new height after scrolling
                 new_height = self.driver.execute_script("return document.body.scrollHeight")
                 
-                # Break the loop if no new content is loaded after scrolling
                 if new_height == last_height:
                     break
                 
-                # Update the last height for the next iteration
                 last_height = new_height
                 scroll_count += 1
         except Exception as e:
@@ -186,7 +232,9 @@ class ScrapeReviews:
                     "Name": name,
                     "Comment": comment,
                 }
-                reviews.append(mydict)  #  a list of all dictionary elements
+                reviews.append(mydict)
+
+            print(f"[INFO] Extracted {len(reviews)} reviews for: {self.product_title}")
 
             review_data = pd.DataFrame(
                 reviews,
@@ -214,14 +262,11 @@ class ScrapeReviews:
 
     def get_review_data(self) -> pd.DataFrame:
         try:
-            # search_string = self.request.form["content"].replace(" ", "-")
-            # no_of_products = int(self.request.form["prod_no"])
-
             product_urls = self.scrape_product_urls(product_name=self.product_name)
 
             if not product_urls:
                 self.driver.quit()
-                print("No products found for the given search query.")
+                print("[WARN] No products found for the given search query.")
                 return None
 
             product_details = []
@@ -243,21 +288,16 @@ class ScrapeReviews:
 
             self.driver.quit()
 
+            if not product_details:
+                print("[WARN] No review data collected from any product.")
+                return None
+
             data = pd.concat(product_details, axis=0)
             
             data.to_csv("data.csv", index=False)
             
-            return data   # For running Streamlit app, you can return the data as dataframe directly
-                
-            # For running Flask app, you can return the columns and values separately. Uncomment the following lines:
-
-            # columns = data.columns
-
-            # values = [[data.loc[i, col] for col in data.columns ] for i in range(len(data)) ]
-            
-            # return columns, values
-        
-    
+            print(f"[INFO] Total reviews scraped: {len(data)}")
+            return data
 
         except Exception as e:
             raise CustomException(e, sys)
