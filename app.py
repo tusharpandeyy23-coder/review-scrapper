@@ -23,14 +23,27 @@ def form_input():
                                      min_value=1)
 
     if st.button("Scrape Reviews"):
-        scrapper = ScrapeReviews(
-            product_name=product,
-            no_of_products=int(no_of_products)
-        )
+        if not product or product.strip() == "":
+            st.error("❌ Please enter a product name to search.")
+            return
 
-        scrapped_data = scrapper.get_review_data()
-        if scrapped_data is not None:
+        try:
+            with st.spinner("🔍 Scraping reviews... This may take a minute..."):
+                scrapper = ScrapeReviews(
+                    product_name=product,
+                    no_of_products=int(no_of_products)
+                )
+
+                scrapped_data = scrapper.get_review_data()
+
+        except Exception as e:
+            st.error(f"❌ Scraping failed: {e}")
+            st.info("💡 This can happen if Chrome/Chromium is not available or if the website is blocking requests from this server.")
+            return
+
+        if scrapped_data is not None and not scrapped_data.empty:
             st.session_state["data"] = True
+            st.success(f"✅ Found {len(scrapped_data)} reviews!")
             try:
                 mongoio = MongoIO()
                 mongoio.store_reviews(product_name=product,
@@ -39,7 +52,9 @@ def form_input():
             except Exception as e:
                 st.warning(f"⚠️ Could not store to MongoDB (data is saved to data.csv instead): {e}")
 
-        st.dataframe(scrapped_data)
+            st.dataframe(scrapped_data)
+        else:
+            st.warning("⚠️ No reviews found for this product. Try a different search term.")
 
 
 if __name__ == "__main__":

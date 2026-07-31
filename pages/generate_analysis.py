@@ -1,11 +1,17 @@
 import pandas as pd
 import streamlit as st
-from src.cloud_io import MongoIO
 from src.constants import SESSION_PRODUCT_KEY
-from src.utils import fetch_product_names_from_cloud
 from src.data_report.generate_data_report import DashboardGenerator
 
-mongo_con = MongoIO()
+# Lazy-load MongoIO to avoid crash if MONGO_DB_URL is not set
+mongo_con = None
+
+def get_mongo():
+    global mongo_con
+    if mongo_con is None:
+        from src.cloud_io import MongoIO
+        mongo_con = MongoIO()
+    return mongo_con
 
 
 def create_analysis_page(review_data: pd.DataFrame):
@@ -25,7 +31,8 @@ def create_analysis_page(review_data: pd.DataFrame):
 try:
 
     if st.session_state.data:
-        data = mongo_con.get_reviews(product_name=st.session_state[SESSION_PRODUCT_KEY])
+        mongo = get_mongo()
+        data = mongo.get_reviews(product_name=st.session_state[SESSION_PRODUCT_KEY])
         create_analysis_page(data)
 
     else:
@@ -36,4 +43,5 @@ try:
 except AttributeError:
     product_name = None
     st.markdown(""" # No Data Available for analysis.""")
-
+except Exception as e:
+    st.error(f"❌ Error loading analysis page: {e}")

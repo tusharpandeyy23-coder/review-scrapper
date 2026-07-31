@@ -18,21 +18,27 @@ class ScrapeReviews:
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument('--headless')
+        options.add_argument('--headless=new')
         options.add_argument('--window-size=1920,1080')
         options.add_argument('--disable-gpu')
         options.add_argument('--disable-extensions')
         options.add_argument('--remote-debugging-port=0')
+        options.add_argument('--disable-software-rasterizer')
         options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36')
         options.add_argument('--disable-blink-features=AutomationControlled')
         
         # Use Chromium binary from env var if available (Docker/Render)
         chrome_bin = os.environ.get("CHROME_BIN")
         if chrome_bin:
+            print(f"[INFO] Using Chrome binary from CHROME_BIN: {chrome_bin}")
             options.binary_location = chrome_bin
+        else:
+            print("[INFO] CHROME_BIN not set, using default Chrome")
 
         # Start a new Chrome browser session (auto-detects chromedriver)
+        print("[INFO] Starting Chrome driver...")
         self.driver = webdriver.Chrome(options=options)
+        print("[INFO] Chrome driver started successfully!")
         self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
         })
