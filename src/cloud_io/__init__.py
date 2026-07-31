@@ -1,28 +1,43 @@
 import pandas as pd
-from database_connect import mongo_operation as mongo
+import pymongo
+import certifi
+import json
 import os, sys
 from src.constants import *
 from src.exception import CustomException
 
 
 class MongoIO:
-    mongo_ins = None
+    _client = None
+    _db = None
 
     def __init__(self):
-        if MongoIO.mongo_ins is None:
+        if MongoIO._client is None:
             mongo_db_url = os.getenv(MONGODB_URL_KEY)
             if mongo_db_url is None:
                 raise Exception(f"Environment key: {MONGODB_URL_KEY} is not set.")
-            MongoIO.mongo_ins = mongo(client_url=mongo_db_url,
-                                      database_name=MONGO_DATABASE_NAME)
-        self.mongo_ins = MongoIO.mongo_ins
+            
+            # Connect with proper SSL certificates
+            MongoIO._client = pymongo.MongoClient(
+                mongo_db_url,
+                tlsCAFile=certifi.where(),
+                serverSelectionTimeoutMS=30000
+            )
+            MongoIO._db = MongoIO._client[MONGO_DATABASE_NAME]
+            print(f"[INFO] Connected to MongoDB database: {MONGO_DATABASE_NAME}")
+        
+        self.db = MongoIO._db
 
     def store_reviews(self,
                       product_name: str, reviews: pd.DataFrame):
         try:
             collection_name = product_name.replace(" ", "_")
-            self.mongo_ins.bulk_insert(reviews,
-                                       collection_name)
+            collection = self.db[collection_name]
+            
+            # Convert DataFrame to list of dicts and insert
+            data_json = json.loads(reviews.to_json(orient='records'))
+            collection.insert_many(data_json)
+            print(f"[INFO] Stored {len(data_json)} reviews in collection: {collection_name}")
 
         except Exception as e:
             raise CustomException(e, sys)
@@ -30,9 +45,11 @@ class MongoIO:
     def get_reviews(self,
                     product_name: str):
         try:
-            data = self.mongo_ins.find(
-                collection_name=product_name.replace(" ", "_")
-            )
+            collection_name = product_name.replace(" ", "_")
+            collection = self.db[collection_name]
+            
+            cursor = collection.find()
+            data = pd.DataFrame(list(cursor))
 
             return data
 

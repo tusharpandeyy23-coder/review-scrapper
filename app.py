@@ -2,17 +2,20 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
-from src.cloud_io import MongoIO
 from src.constants import SESSION_PRODUCT_KEY
 from src.scrapper.scrape import ScrapeReviews
 
 st.set_page_config(
     "myntra-review-scrapper"
-
 )
 
 st.title("Myntra Review Scrapper")
-st.session_state["data"] = False
+
+# Initialize session state
+if "data" not in st.session_state:
+    st.session_state["data"] = False
+if "scrapped_data" not in st.session_state:
+    st.session_state["scrapped_data"] = None
 
 
 def form_input():
@@ -43,8 +46,12 @@ def form_input():
 
         if scrapped_data is not None and not scrapped_data.empty:
             st.session_state["data"] = True
+            st.session_state["scrapped_data"] = scrapped_data
             st.success(f"✅ Found {len(scrapped_data)} reviews!")
+
+            # Try to store in MongoDB (optional)
             try:
+                from src.cloud_io import MongoIO
                 mongoio = MongoIO()
                 mongoio.store_reviews(product_name=product,
                                       reviews=scrapped_data)
@@ -52,10 +59,13 @@ def form_input():
             except Exception as e:
                 st.warning(f"⚠️ Could not store to MongoDB (data is saved to data.csv instead): {e}")
 
-            st.dataframe(scrapped_data)
         else:
             st.warning("⚠️ No reviews found for this product. Try a different search term.")
 
+    # Always display data if available (persists across re-renders)
+    if st.session_state["scrapped_data"] is not None:
+        st.subheader("📋 Scraped Reviews")
+        st.dataframe(st.session_state["scrapped_data"], use_container_width=True)
 
-if __name__ == "__main__":
-    data = form_input()
+
+form_input()
