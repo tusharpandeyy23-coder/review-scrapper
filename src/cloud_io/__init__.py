@@ -3,8 +3,12 @@ import pymongo
 import certifi
 import json
 import os, sys
+from dotenv import load_dotenv
 from src.constants import *
 from src.exception import CustomException
+
+# Ensure .env is loaded (needed for Streamlit multipage apps)
+load_dotenv()
 
 
 class MongoIO:
@@ -16,6 +20,12 @@ class MongoIO:
             mongo_db_url = os.getenv(MONGODB_URL_KEY)
             if mongo_db_url is None:
                 raise Exception(f"Environment key: {MONGODB_URL_KEY} is not set.")
+            
+            # Clean URL — strip quotes/spaces that may have been added accidentally
+            mongo_db_url = mongo_db_url.strip().strip('"').strip("'")
+            
+            if not mongo_db_url.startswith(("mongodb://", "mongodb+srv://")):
+                raise Exception(f"Invalid MongoDB URL. Must start with 'mongodb://' or 'mongodb+srv://'. Got: {mongo_db_url[:30]}...")
             
             # Connect with proper SSL certificates
             MongoIO._client = pymongo.MongoClient(
