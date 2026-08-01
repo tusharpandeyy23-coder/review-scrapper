@@ -9,7 +9,7 @@ import pandas as pd
 from urllib.parse import quote
 from src.exception import CustomException
 
-# Import curl_cffi for TLS Fingerprint Impersonation (Bypasses Cloudflare & Cloud IP blocks on Render)
+# Import curl_cffi for Chrome TLS Fingerprint Impersonation (Bypasses Cloudflare & Cloud IP blocks on Render)
 try:
     from curl_cffi import requests as cffi_requests
     CURL_CFFI_AVAILABLE = True
@@ -17,12 +17,11 @@ except ImportError:
     CURL_CFFI_AVAILABLE = False
     import requests as cffi_requests
 
-# Standard requests as fallback
 import requests as std_requests
 
 USER_AGENTS = [
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
 ]
 
@@ -38,17 +37,21 @@ class ScrapeReviews:
         return {
             'User-Agent': ua,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Language': 'en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Referer': referer,
+            'X-Country-Code': 'IN',
+            'X-Meta-App': 'myntra',
+            'X-Myntra-App-Name': 'web',
+            'Cookie': 'geo=IN; country=IN; region=IN; store=IN; is_in_app=false;',
             'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124"',
             'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"macOS"',
+            'Sec-Ch-Ua-Platform': '"Windows"',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Site': 'none',
             'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0',
         }
@@ -76,16 +79,16 @@ class ScrapeReviews:
         return None
 
     def _fetch_page_http(self, url: str, status_callback=None):
-        """Fetch URL via curl_cffi TLS impersonation with standard requests fallback"""
+        """Fetch URL via curl_cffi TLS impersonation with Indian geo headers"""
         start_time = time.time()
         headers = self._get_headers(referer="https://www.myntra.com/")
         
-        # 1. Try curl_cffi with Chrome 124 TLS Fingerprint
+        # 1. Try curl_cffi with Chrome 124 TLS Fingerprint & Indian Geo Headers
         if CURL_CFFI_AVAILABLE:
             try:
                 res = cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=15)
                 elapsed = round(time.time() - start_time, 2)
-                status_msg = f"HTTP {res.status_code} ({elapsed}s via TLS Impersonation) -> {url[:60]}..."
+                status_msg = f"HTTP {res.status_code} ({elapsed}s via TLS Impersonation) -> {url[:65]}..."
                 
                 if res.status_code == 200 and len(res.text) > 3000:
                     self._log_status(status_callback, f"✅ {status_msg}", "info")
@@ -95,11 +98,11 @@ class ScrapeReviews:
             except Exception as e:
                 self._log_status(status_callback, f"⚠️ TLS fetch warning for {url[:50]}: {e}", "warning")
 
-        # 2. Fallback to standard Python requests
+        # 2. Fallback to standard Python requests with Indian Geo Headers
         try:
             res = std_requests.get(url, headers=headers, timeout=12)
             elapsed = round(time.time() - start_time, 2)
-            status_msg = f"HTTP {res.status_code} ({elapsed}s via Requests) -> {url[:60]}..."
+            status_msg = f"HTTP {res.status_code} ({elapsed}s via Requests) -> {url[:65]}..."
             if res.status_code == 200 and len(res.text) > 3000:
                 self._log_status(status_callback, f"✅ {status_msg}", "info")
                 return res.text
@@ -142,7 +145,7 @@ class ScrapeReviews:
 
             self.driver = webdriver.Chrome(options=options)
             stealth(self.driver,
-                    languages=["en-US", "en"],
+                    languages=["en-IN", "en-US", "en"],
                     vendor="Google Inc.",
                     platform="Win32",
                     webgl_vendor="Intel Inc.",
@@ -169,28 +172,38 @@ class ScrapeReviews:
     def _fetch_page(self, url: str, status_callback=None):
         """Combined fetcher: Direct HTTP/TLS first, Selenium fallback if needed"""
         html = self._fetch_page_http(url, status_callback)
-        if not html or len(html) < 2000:
+        if not html or len(html) < 3000:
             self._log_status(status_callback, f"🔄 Retrying via browser engine for: {url[:50]}", "warning")
             html = self._fetch_page_selenium(url, status_callback)
         return html
 
     def scrape_product_list(self, status_callback=None):
         """Scrape product catalog up to self.no_of_products (1 to 100)"""
-        search_query = self.product_name.replace(" ", "-")
-        encoded_query = quote(search_query)
+        # Slugify search query for Myntra URL
+        raw_q = self.product_name.strip()
+        slug_q = re.sub(r'[^a-zA-Z0-9]+', '-', raw_q.lower()).strip('-')
 
         products = []
         page = 1
 
         while len(products) < self.no_of_products and page <= 5:
-            url = f"https://www.myntra.com/{search_query}?rawQuery={encoded_query}&p={page}"
-            self._log_status(status_callback, f"🔍 Searching Page {page}: Fetching catalog...", "info")
+            # Try primary slugified URL first, then raw query URL
+            urls_to_try = [
+                f"https://www.myntra.com/{slug_q}?rawQuery={slug_q}&p={page}",
+                f"https://www.myntra.com/{quote(raw_q)}?p={page}"
+            ]
             
-            html = self._fetch_page(url, status_callback)
+            html = None
+            for url in urls_to_try:
+                self._log_status(status_callback, f"🔍 Searching Page {page}: Fetching catalog ({url[:50]})...", "info")
+                html = self._fetch_page(url, status_callback)
+                if html and len(html) > 3000:
+                    break
+
             if not html:
                 break
 
-            # Method 1: Extract from window.__myx script
+            # Extract from window.__myx script
             data = self._parse_myx_script(html)
             page_products = []
             
@@ -213,28 +226,6 @@ class ScrapeReviews:
                     }
                     page_products.append(product_info)
 
-            # Method 2: BeautifulSoup DOM Parsing Fallback
-            if not page_products:
-                soup = bs(html, 'html.parser')
-                results = soup.find_all("li", {"class": "product-base"}) or soup.find_all("ul", {"class": "results-base"})
-                for res_item in results:
-                    anchors = res_item.find_all("a", href=True)
-                    for a in anchors:
-                        href = a["href"]
-                        full_url = href if href.startswith("http") else "https://www.myntra.com/" + href.lstrip("/")
-                        title_el = a.find("h4", class_="product-product") or a.find("h3", class_="product-brand")
-                        title = title_el.text.strip() if title_el else self.product_name
-                        page_products.append({
-                            'product_id': href.split('/')[-2] if '/' in href else '',
-                            'product_name': title,
-                            'brand': '',
-                            'price': '₹0',
-                            'raw_price': 0,
-                            'overall_rating': 0.0,
-                            'rating_count': 0,
-                            'landing_url': full_url
-                        })
-
             if not page_products:
                 self._log_status(status_callback, f"⚠️ No products found on page {page}.", "warning")
                 break
@@ -247,7 +238,7 @@ class ScrapeReviews:
 
             self._log_status(status_callback, f"📦 Page {page}: Collected {len(products)}/{self.no_of_products} products", "info")
             page += 1
-            time.sleep(random.uniform(0.3, 0.8))
+            time.sleep(random.uniform(0.3, 0.7))
 
         return products[:self.no_of_products]
 
@@ -319,24 +310,6 @@ class ScrapeReviews:
                             "Comment": r.get('reviewText') or r.get('review') or "Nice product",
                             "Upvotes": r.get('upvotes', 0),
                             "Downvotes": r.get('downvotes', 0),
-                        })
-
-                if not reviews_list:
-                    soup = bs(html, 'html.parser')
-                    review_blocks = soup.find_all("div", {"class": "user-review-reviewTextWrapper"}) or soup.find_all("div", {"class": "detailed-reviews-userReviewsContainer"})
-                    for block in review_blocks:
-                        comment = block.text.strip()
-                        reviews_list.append({
-                            "Product Name": pname,
-                            "Brand": product.get('brand', ''),
-                            "Over_All_Rating": product.get('overall_rating', 0.0),
-                            "Price": product.get('price', ''),
-                            "Date": "Recent",
-                            "Rating": product.get('overall_rating', 4.0),
-                            "Name": "Verified Customer",
-                            "Comment": comment if comment else "Great item",
-                            "Upvotes": 0,
-                            "Downvotes": 0,
                         })
 
         # 3. Synthetic summary record if no text reviews written yet
