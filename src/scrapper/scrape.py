@@ -68,11 +68,11 @@ class ScrapeReviews:
             status_callback(message, level)
 
     def _init_selenium_driver(self, status_callback=None):
-        """Initialize Headless Chrome Driver with stealth settings & session cookies"""
+        """Initialize Headless Chrome Driver with CDP Indian Geo Headers & stealth settings"""
         if self.driver is not None:
             return self.driver
 
-        self._log_status(status_callback, "🌐 Initializing browser engine & cookies...", "info")
+        self._log_status(status_callback, "🌐 Initializing browser engine & security headers...", "info")
         try:
             from selenium import webdriver
             from selenium.webdriver.chrome.options import Options
@@ -101,6 +101,28 @@ class ScrapeReviews:
                 options.binary_location = chrome_bin
 
             self.driver = webdriver.Chrome(options=options)
+
+            # Enable CDP Network interception & inject Indian Geo Headers into Chrome
+            try:
+                self.driver.execute_cdp_cmd('Network.enable', {})
+                self.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
+                    'headers': {
+                        'Accept-Language': 'en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
+                        'X-Country-Code': 'IN',
+                        'X-Meta-App': 'myntra',
+                        'X-Myntra-App-Name': 'web',
+                        'Cookie': 'geo=IN; country=IN; region=IN; store=IN; is_in_app=false;'
+                    }
+                })
+                self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                    'source': '''
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN', 'en-US', 'en']});
+                    '''
+                })
+            except Exception as cdp_err:
+                print(f"[WARN] CDP injection issue: {cdp_err}", flush=True)
+
             stealth(self.driver,
                     languages=["en-IN", "en-US", "en"],
                     vendor="Google Inc.",
@@ -111,9 +133,9 @@ class ScrapeReviews:
 
             # Warmup home page to collect Akamai security cookies
             self.driver.get("https://www.myntra.com/")
-            time.sleep(2)
+            time.sleep(3)
             cookies = self.driver.get_cookies()
-            self._log_status(status_callback, f"✅ Browser engine initialized ({len(cookies)} cookies active)!", "info")
+            self._log_status(status_callback, f"✅ Browser engine initialized ({len(cookies)} security cookies active)!", "info")
 
             # Transfer cookies to HTTP session
             if CURL_CFFI_AVAILABLE:
@@ -145,9 +167,11 @@ class ScrapeReviews:
         try:
             soup = bs(html_content, 'html.parser')
             for script in soup.find_all('script'):
-                if script.string and 'window.__myx' in script.string:
+                if script.string and ('window.__myx' in script.string or 'window.MYNTRA.myx' in script.string):
                     txt = script.string
                     idx = txt.find('window.__myx = ')
+                    if idx == -1:
+                        idx = txt.find('window.MYNTRA.myx = ')
                     if idx != -1:
                         json_start = txt.find('{', idx)
                         decoder = json.JSONDecoder()
@@ -188,7 +212,7 @@ class ScrapeReviews:
         try:
             start_time = time.time()
             driver.get(url)
-            time.sleep(2.5)
+            time.sleep(3)
             elapsed = round(time.time() - start_time, 2)
             html = driver.page_source
             if html and len(html) > 3000:
@@ -203,14 +227,11 @@ class ScrapeReviews:
 
     def _fetch_page(self, url: str, status_callback=None):
         """Combined fetcher: Headless Chrome initializes first and warms cookies for HTTP engine"""
-        # Ensure browser driver & cookies are initialized
         if not self._session_warmed:
             self._init_selenium_driver(status_callback)
 
-        # Try fast HTTP request with transferred cookies
         html = self._fetch_page_http(url, status_callback)
         if not html or len(html) < 3000:
-            # Fall back directly to headless Chrome
             html = self._fetch_page_selenium(url, status_callback)
         return html
 
