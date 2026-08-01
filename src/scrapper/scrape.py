@@ -1,4 +1,3 @@
-import requests
 import json
 import re
 import os
@@ -10,22 +9,28 @@ import pandas as pd
 from urllib.parse import quote
 from src.exception import CustomException
 
-# Modern Browser User-Agent Pool for Rotation
+# Import curl_cffi for TLS Fingerprint Impersonation (Bypasses Cloudflare & Cloud IP blocks on Render)
+try:
+    from curl_cffi import requests as cffi_requests
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    CURL_CFFI_AVAILABLE = False
+    import requests as cffi_requests
+
+# Standard requests as fallback
+import requests as std_requests
+
 USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
 ]
 
 
 class ScrapeReviews:
     def __init__(self, product_name: str, no_of_products: int = 10):
         self.product_name = product_name.strip()
-        # Cap range to 1 - 100 as requested
         self.no_of_products = max(1, min(100, int(no_of_products)))
-        self.session = requests.Session()
         self.driver = None
 
     def _get_headers(self, referer="https://www.myntra.com/"):
@@ -49,7 +54,7 @@ class ScrapeReviews:
         }
 
     def _log_status(self, status_callback, message: str, level: str = "info"):
-        print(f"[{level.upper()}] {message}")
+        print(f"[{level.upper()}] {message}", flush=True)
         if status_callback:
             status_callback(message, level)
 
@@ -67,20 +72,35 @@ class ScrapeReviews:
                         obj, _ = decoder.raw_decode(txt, json_start)
                         return obj
         except Exception as e:
-            print(f"[WARN] Error decoding window.__myx: {e}")
+            print(f"[WARN] Error decoding window.__myx: {e}", flush=True)
         return None
 
     def _fetch_page_http(self, url: str, status_callback=None):
-        """Fetch URL via direct HTTP request with robust headers & status report"""
+        """Fetch URL via curl_cffi TLS impersonation with standard requests fallback"""
         start_time = time.time()
         headers = self._get_headers(referer="https://www.myntra.com/")
         
+        # 1. Try curl_cffi with Chrome 124 TLS Fingerprint
+        if CURL_CFFI_AVAILABLE:
+            try:
+                res = cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=15)
+                elapsed = round(time.time() - start_time, 2)
+                status_msg = f"HTTP {res.status_code} ({elapsed}s via TLS Impersonation) -> {url[:60]}..."
+                
+                if res.status_code == 200 and len(res.text) > 3000:
+                    self._log_status(status_callback, f"✅ {status_msg}", "info")
+                    return res.text
+                else:
+                    self._log_status(status_callback, f"⚠️ {status_msg} (Response len: {len(res.text)})", "warning")
+            except Exception as e:
+                self._log_status(status_callback, f"⚠️ TLS fetch warning for {url[:50]}: {e}", "warning")
+
+        # 2. Fallback to standard Python requests
         try:
-            res = self.session.get(url, headers=headers, timeout=12)
+            res = std_requests.get(url, headers=headers, timeout=12)
             elapsed = round(time.time() - start_time, 2)
-            status_msg = f"HTTP {res.status_code} ({elapsed}s) -> {url[:65]}..."
-            
-            if res.status_code == 200:
+            status_msg = f"HTTP {res.status_code} ({elapsed}s via Requests) -> {url[:60]}..."
+            if res.status_code == 200 and len(res.text) > 3000:
                 self._log_status(status_callback, f"✅ {status_msg}", "info")
                 return res.text
             else:
@@ -147,7 +167,7 @@ class ScrapeReviews:
             return None
 
     def _fetch_page(self, url: str, status_callback=None):
-        """Combined fetcher: Direct HTTP first, Selenium fallback if needed"""
+        """Combined fetcher: Direct HTTP/TLS first, Selenium fallback if needed"""
         html = self._fetch_page_http(url, status_callback)
         if not html or len(html) < 2000:
             self._log_status(status_callback, f"🔄 Retrying via browser engine for: {url[:50]}", "warning")
@@ -193,7 +213,7 @@ class ScrapeReviews:
                     }
                     page_products.append(product_info)
 
-            # Method 2: BeautifulSoup DOM Parsing Fallback if JSON state missing
+            # Method 2: BeautifulSoup DOM Parsing Fallback
             if not page_products:
                 soup = bs(html, 'html.parser')
                 results = soup.find_all("li", {"class": "product-base"}) or soup.find_all("ul", {"class": "results-base"})
@@ -227,7 +247,7 @@ class ScrapeReviews:
 
             self._log_status(status_callback, f"📦 Page {page}: Collected {len(products)}/{self.no_of_products} products", "info")
             page += 1
-            time.sleep(random.uniform(0.5, 1.2))
+            time.sleep(random.uniform(0.3, 0.8))
 
         return products[:self.no_of_products]
 
@@ -251,7 +271,6 @@ class ScrapeReviews:
                     rev_data = data['reviewsData']
                     items = rev_data.get('reviews') or rev_data.get('userReviews') or rev_data.get('topReviews') or []
                     for r in items:
-                        # Format timestamp to human readable date
                         ts = r.get('updatedAt') or r.get('timestamp')
                         date_str = "Recent"
                         if ts:
@@ -302,7 +321,6 @@ class ScrapeReviews:
                             "Downvotes": r.get('downvotes', 0),
                         })
 
-                # DOM fallback parsing using BeautifulSoup if JSON state was missing
                 if not reviews_list:
                     soup = bs(html, 'html.parser')
                     review_blocks = soup.find_all("div", {"class": "user-review-reviewTextWrapper"}) or soup.find_all("div", {"class": "detailed-reviews-userReviewsContainer"})
@@ -321,7 +339,7 @@ class ScrapeReviews:
                             "Downvotes": 0,
                         })
 
-        # 3. If product has no individual text reviews written yet, generate synthetic summary record
+        # 3. Synthetic summary record if no text reviews written yet
         if not reviews_list:
             reviews_list.append({
                 "Product Name": pname,
@@ -360,7 +378,7 @@ class ScrapeReviews:
                 
                 revs = self.extract_product_reviews(prod, status_callback)
                 all_reviews.extend(revs)
-                time.sleep(random.uniform(0.3, 0.8))
+                time.sleep(random.uniform(0.2, 0.5))
 
             if self.driver:
                 self.driver.quit()
@@ -369,7 +387,6 @@ class ScrapeReviews:
                 return None
 
             df = pd.DataFrame(all_reviews)
-            # Save local CSV backup
             df.to_csv("data.csv", index=False)
             
             elapsed_total = round(time.time() - start_time, 2)
