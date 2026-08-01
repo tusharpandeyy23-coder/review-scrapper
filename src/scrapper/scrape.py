@@ -34,7 +34,9 @@ class ScrapeReviews:
         self.session = None
         self._session_warmed = False
 
-        # Support optional proxy via environment variables for cloud hosts
+        # Support ZenRows API key, ScraperAPI key, or Proxy URL from environment
+        self.zenrows_key = os.environ.get("ZENROWS_API_KEY") or os.environ.get("ZENROWS_KEY") or "5d82c9a1f18123d86276dc9bb63fec21549ab4b9"
+        self.scraper_api_key = os.environ.get("SCRAPER_API_KEY")
         self.proxy_url = os.environ.get("PROXY_URL") or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
         self.proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
 
@@ -66,6 +68,54 @@ class ScrapeReviews:
         print(f"[{level.upper()}] {message}", flush=True)
         if status_callback:
             status_callback(message, level)
+
+    def _fetch_page_zenrows(self, url: str, status_callback=None):
+        """Fetch URL via ZenRows API with JS rendering & Indian proxies"""
+        if not self.zenrows_key:
+            return None
+        
+        start_time = time.time()
+        params = {
+            'url': url,
+            'apikey': self.zenrows_key,
+            'js_render': 'true',
+            'premium_proxy': 'true',
+            'proxy_country': 'in',
+        }
+        
+        try:
+            res = std_requests.get('https://api.zenrows.com/v1/', params=params, timeout=30)
+            elapsed = round(time.time() - start_time, 2)
+            if res.status_code == 200 and len(res.text) > 3000:
+                self._log_status(status_callback, f"✅ HTTP 200 ({elapsed}s via ZenRows API) -> {url[:55]}...", "info")
+                return res.text
+            else:
+                self._log_status(status_callback, f"⚠️ ZenRows returned HTTP {res.status_code} (len: {len(res.text)})", "warning")
+                return None
+        except Exception as e:
+            self._log_status(status_callback, f"⚠️ ZenRows API error for {url[:50]}: {e}", "warning")
+            return None
+
+    def _fetch_page_scraperapi(self, url: str, status_callback=None):
+        """Fetch URL via ScraperAPI if key is set"""
+        if not self.scraper_api_key:
+            return None
+        start_time = time.time()
+        params = {
+            'api_key': self.scraper_api_key,
+            'url': url,
+            'render': 'true',
+            'country_code': 'in',
+        }
+        try:
+            res = std_requests.get('http://api.scraperapi.com', params=params, timeout=35)
+            elapsed = round(time.time() - start_time, 2)
+            if res.status_code == 200 and len(res.text) > 3000:
+                self._log_status(status_callback, f"✅ HTTP 200 ({elapsed}s via ScraperAPI) -> {url[:55]}...", "info")
+                return res.text
+        except Exception:
+            pass
+        return None
 
     def _init_selenium_driver(self, status_callback=None):
         """Initialize Headless Chrome Driver with CDP Indian Geo Headers & stealth settings"""
@@ -102,7 +152,6 @@ class ScrapeReviews:
 
             self.driver = webdriver.Chrome(options=options)
 
-            # Enable CDP Network interception & inject Indian Geo Headers into Chrome
             try:
                 self.driver.execute_cdp_cmd('Network.enable', {})
                 self.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
@@ -131,13 +180,11 @@ class ScrapeReviews:
                     renderer="Intel Iris OpenGL Engine",
                     fix_hairline=True)
 
-            # Warmup home page to collect Akamai security cookies
             self.driver.get("https://www.myntra.com/")
             time.sleep(3)
             cookies = self.driver.get_cookies()
             self._log_status(status_callback, f"✅ Browser engine initialized ({len(cookies)} security cookies active)!", "info")
 
-            # Transfer cookies to HTTP session
             if CURL_CFFI_AVAILABLE:
                 try:
                     self.session = cffi_requests.Session(impersonate="chrome124", proxies=self.proxies)
@@ -181,59 +228,42 @@ class ScrapeReviews:
             print(f"[WARN] Error decoding window.__myx: {e}", flush=True)
         return None
 
-    def _fetch_page_http(self, url: str, status_callback=None):
-        """Fetch URL via transferred cookies TLS session"""
-        if not self._session_warmed or self.session is None:
-            return None
-
-        start_time = time.time()
-        headers = self._get_headers(referer="https://www.myntra.com/")
-        
-        try:
-            res = self.session.get(url, headers=headers, allow_redirects=True, timeout=12)
-            elapsed = round(time.time() - start_time, 2)
-            status_msg = f"HTTP {res.status_code} ({elapsed}s via Warmed Session) -> {url[:60]}..."
-            
-            if res.status_code == 200 and len(res.text) > 3000:
-                self._log_status(status_callback, f"✅ {status_msg}", "info")
-                return res.text
-            else:
-                self._log_status(status_callback, f"⚠️ {status_msg} (Response len: {len(res.text)})", "warning")
-                return None
-        except Exception as e:
-            self._log_status(status_callback, f"⚠️ HTTP fetch error: {e}", "warning")
-            return None
-
-    def _fetch_page_selenium(self, url: str, status_callback=None):
-        """Fetch URL using full headless Chrome engine"""
-        driver = self._init_selenium_driver(status_callback)
-        if not driver:
-            return None
-        try:
-            start_time = time.time()
-            driver.get(url)
-            time.sleep(3)
-            elapsed = round(time.time() - start_time, 2)
-            html = driver.page_source
-            if html and len(html) > 3000:
-                self._log_status(status_callback, f"✅ Page loaded ({elapsed}s via Browser Engine) -> {url[:60]}...", "info")
-                return html
-            else:
-                self._log_status(status_callback, f"⚠️ Browser page short (len: {len(html) if html else 0})", "warning")
-                return None
-        except Exception as e:
-            self._log_status(status_callback, f"❌ Browser engine fetch failed: {e}", "error")
-            return None
-
     def _fetch_page(self, url: str, status_callback=None):
-        """Combined fetcher: Headless Chrome initializes first and warms cookies for HTTP engine"""
+        """Combined fetcher: ZenRows API first -> ScraperAPI -> Warmed TLS Session -> Browser Engine"""
+        # 1. ZenRows API
+        html = self._fetch_page_zenrows(url, status_callback)
+        if html and len(html) > 3000:
+            return html
+
+        # 2. ScraperAPI
+        html = self._fetch_page_scraperapi(url, status_callback)
+        if html and len(html) > 3000:
+            return html
+
+        # 3. Warmed TLS Session
         if not self._session_warmed:
             self._init_selenium_driver(status_callback)
 
-        html = self._fetch_page_http(url, status_callback)
-        if not html or len(html) < 3000:
-            html = self._fetch_page_selenium(url, status_callback)
-        return html
+        if self.session is not None:
+            try:
+                res = self.session.get(url, headers=self._get_headers(), allow_redirects=True, timeout=12)
+                if res.status_code == 200 and len(res.text) > 3000:
+                    return res.text
+            except Exception:
+                pass
+
+        # 4. Browser Engine Fallback
+        if self.driver is not None:
+            try:
+                self.driver.get(url)
+                time.sleep(3)
+                html = self.driver.page_source
+                if html and len(html) > 3000:
+                    return html
+            except Exception:
+                pass
+
+        return None
 
     def scrape_product_list(self, status_callback=None):
         """Scrape product catalog up to self.no_of_products (1 to 100)"""
