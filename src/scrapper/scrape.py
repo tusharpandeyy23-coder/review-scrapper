@@ -9,7 +9,7 @@ import pandas as pd
 from urllib.parse import quote
 from src.exception import CustomException
 
-# Import curl_cffi for Chrome TLS Fingerprint Impersonation
+# Import curl_cffi for TLS Fingerprint Impersonation
 try:
     from curl_cffi import requests as cffi_requests
     CURL_CFFI_AVAILABLE = True
@@ -67,95 +67,12 @@ class ScrapeReviews:
         if status_callback:
             status_callback(message, level)
 
-    def _init_warmed_session(self, status_callback=None):
-        """Warm up TLS session & fetch Akamai session security tokens"""
-        if self._session_warmed and self.session is not None:
-            return self.session
-
-        self._log_status(status_callback, "🌐 Initializing TLS Chrome session & fetching security tokens...", "info")
-        
-        if CURL_CFFI_AVAILABLE:
-            try:
-                self.session = cffi_requests.Session(impersonate="chrome124", proxies=self.proxies)
-            except Exception:
-                self.session = std_requests.Session()
-                if self.proxies:
-                    self.session.proxies = self.proxies
-        else:
-            self.session = std_requests.Session()
-            if self.proxies:
-                self.session.proxies = self.proxies
-
-        headers = self._get_headers(referer="https://www.google.com/")
-        try:
-            res = self.session.get("https://www.myntra.com/", headers=headers, timeout=12)
-            if res.status_code == 200:
-                self._session_warmed = True
-                self._log_status(status_callback, f"✅ Session security tokens established ({len(self.session.cookies)} cookies obtained)!", "info")
-            else:
-                self._log_status(status_callback, f"⚠️ Session warmup returned HTTP {res.status_code}", "warning")
-        except Exception as e:
-            self._log_status(status_callback, f"⚠️ Session warmup warning: {e}", "warning")
-
-        return self.session
-
-    def _parse_myx_script(self, html_content: str):
-        """Extract and parse window.__myx script from page HTML"""
-        try:
-            soup = bs(html_content, 'html.parser')
-            for script in soup.find_all('script'):
-                if script.string and 'window.__myx' in script.string:
-                    txt = script.string
-                    idx = txt.find('window.__myx = ')
-                    if idx != -1:
-                        json_start = txt.find('{', idx)
-                        decoder = json.JSONDecoder()
-                        obj, _ = decoder.raw_decode(txt, json_start)
-                        return obj
-        except Exception as e:
-            print(f"[WARN] Error decoding window.__myx: {e}", flush=True)
-        return None
-
-    def _fetch_page_http(self, url: str, status_callback=None):
-        """Fetch URL via session-warmed TLS impersonation with Indian geo headers"""
-        start_time = time.time()
-        session = self._init_warmed_session(status_callback)
-        headers = self._get_headers(referer="https://www.myntra.com/")
-        
-        try:
-            res = session.get(url, headers=headers, allow_redirects=True, timeout=15)
-            elapsed = round(time.time() - start_time, 2)
-            status_msg = f"HTTP {res.status_code} ({elapsed}s via Warmed TLS Session) -> {url[:60]}..."
-            
-            if res.status_code == 200 and len(res.text) > 3000:
-                self._log_status(status_callback, f"✅ {status_msg}", "info")
-                return res.text
-            else:
-                self._log_status(status_callback, f"⚠️ {status_msg} (Response len: {len(res.text)})", "warning")
-        except Exception as e:
-            self._log_status(status_callback, f"⚠️ TLS fetch error for {url[:50]}: {e}", "warning")
-
-        # Retry with direct standard requests if session failed
-        try:
-            res = std_requests.get(url, headers=headers, proxies=self.proxies, allow_redirects=True, timeout=12)
-            elapsed = round(time.time() - start_time, 2)
-            status_msg = f"HTTP {res.status_code} ({elapsed}s via Requests) -> {url[:60]}..."
-            if res.status_code == 200 and len(res.text) > 3000:
-                self._log_status(status_callback, f"✅ {status_msg}", "info")
-                return res.text
-            else:
-                self._log_status(status_callback, f"⚠️ {status_msg}", "warning")
-                return None
-        except Exception as e:
-            self._log_status(status_callback, f"❌ Request error for {url[:50]}: {e}", "error")
-            return None
-
     def _init_selenium_driver(self, status_callback=None):
-        """Fallback Selenium Headless Driver if direct HTTP is blocked"""
+        """Initialize Headless Chrome Driver with stealth settings & session cookies"""
         if self.driver is not None:
             return self.driver
 
-        self._log_status(status_callback, "🔄 Initializing headless Chrome fallback driver...", "info")
+        self._log_status(status_callback, "🌐 Initializing browser engine & cookies...", "info")
         try:
             from selenium import webdriver
             from selenium.webdriver.chrome.options import Options
@@ -191,29 +108,109 @@ class ScrapeReviews:
                     webgl_vendor="Intel Inc.",
                     renderer="Intel Iris OpenGL Engine",
                     fix_hairline=True)
-            self._log_status(status_callback, "✅ Headless Chrome fallback initialized!", "info")
+
+            # Warmup home page to collect Akamai security cookies
+            self.driver.get("https://www.myntra.com/")
+            time.sleep(2)
+            cookies = self.driver.get_cookies()
+            self._log_status(status_callback, f"✅ Browser engine initialized ({len(cookies)} cookies active)!", "info")
+
+            # Transfer cookies to HTTP session
+            if CURL_CFFI_AVAILABLE:
+                try:
+                    self.session = cffi_requests.Session(impersonate="chrome124", proxies=self.proxies)
+                except Exception:
+                    self.session = std_requests.Session()
+                    if self.proxies:
+                        self.session.proxies = self.proxies
+            else:
+                self.session = std_requests.Session()
+                if self.proxies:
+                    self.session.proxies = self.proxies
+
+            for c in cookies:
+                try:
+                    self.session.cookies.set(c['name'], c['value'], domain=c.get('domain', 'myntra.com'))
+                except Exception:
+                    pass
+            self._session_warmed = True
+
             return self.driver
         except Exception as e:
-            self._log_status(status_callback, f"⚠️ Could not start Selenium: {e}", "warning")
+            self._log_status(status_callback, f"⚠️ Could not start browser engine: {e}", "warning")
+            return None
+
+    def _parse_myx_script(self, html_content: str):
+        """Extract and parse window.__myx script from page HTML"""
+        try:
+            soup = bs(html_content, 'html.parser')
+            for script in soup.find_all('script'):
+                if script.string and 'window.__myx' in script.string:
+                    txt = script.string
+                    idx = txt.find('window.__myx = ')
+                    if idx != -1:
+                        json_start = txt.find('{', idx)
+                        decoder = json.JSONDecoder()
+                        obj, _ = decoder.raw_decode(txt, json_start)
+                        return obj
+        except Exception as e:
+            print(f"[WARN] Error decoding window.__myx: {e}", flush=True)
+        return None
+
+    def _fetch_page_http(self, url: str, status_callback=None):
+        """Fetch URL via transferred cookies TLS session"""
+        if not self._session_warmed or self.session is None:
+            return None
+
+        start_time = time.time()
+        headers = self._get_headers(referer="https://www.myntra.com/")
+        
+        try:
+            res = self.session.get(url, headers=headers, allow_redirects=True, timeout=12)
+            elapsed = round(time.time() - start_time, 2)
+            status_msg = f"HTTP {res.status_code} ({elapsed}s via Warmed Session) -> {url[:60]}..."
+            
+            if res.status_code == 200 and len(res.text) > 3000:
+                self._log_status(status_callback, f"✅ {status_msg}", "info")
+                return res.text
+            else:
+                self._log_status(status_callback, f"⚠️ {status_msg} (Response len: {len(res.text)})", "warning")
+                return None
+        except Exception as e:
+            self._log_status(status_callback, f"⚠️ HTTP fetch error: {e}", "warning")
             return None
 
     def _fetch_page_selenium(self, url: str, status_callback=None):
+        """Fetch URL using full headless Chrome engine"""
         driver = self._init_selenium_driver(status_callback)
         if not driver:
             return None
         try:
+            start_time = time.time()
             driver.get(url)
-            time.sleep(3)
-            return driver.page_source
+            time.sleep(2.5)
+            elapsed = round(time.time() - start_time, 2)
+            html = driver.page_source
+            if html and len(html) > 3000:
+                self._log_status(status_callback, f"✅ Page loaded ({elapsed}s via Browser Engine) -> {url[:60]}...", "info")
+                return html
+            else:
+                self._log_status(status_callback, f"⚠️ Browser page short (len: {len(html) if html else 0})", "warning")
+                return None
         except Exception as e:
-            self._log_status(status_callback, f"❌ Selenium fetch failed: {e}", "error")
+            self._log_status(status_callback, f"❌ Browser engine fetch failed: {e}", "error")
             return None
 
     def _fetch_page(self, url: str, status_callback=None):
-        """Combined fetcher: Warmed TLS Session first, Selenium fallback if needed"""
+        """Combined fetcher: Headless Chrome initializes first and warms cookies for HTTP engine"""
+        # Ensure browser driver & cookies are initialized
+        if not self._session_warmed:
+            self._init_selenium_driver(status_callback)
+
+        # Try fast HTTP request with transferred cookies
         html = self._fetch_page_http(url, status_callback)
         if not html or len(html) < 3000:
-            self._log_status(status_callback, f"🔄 Retrying via browser engine for: {url[:50]}", "warning")
+            # Fall back directly to headless Chrome
             html = self._fetch_page_selenium(url, status_callback)
         return html
 
@@ -226,7 +223,6 @@ class ScrapeReviews:
         page = 1
 
         while len(products) < self.no_of_products and page <= 5:
-            # Query URL patterns
             urls_to_try = [
                 f"https://www.myntra.com/search?rawQuery={quote(raw_q)}&p={page}",
                 f"https://www.myntra.com/{slug_q}?rawQuery={slug_q}&p={page}",
