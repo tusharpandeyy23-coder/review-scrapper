@@ -9,7 +9,7 @@ import pandas as pd
 from urllib.parse import quote
 from src.exception import CustomException
 
-# Import curl_cffi for Chrome TLS Fingerprint Impersonation (Bypasses Cloudflare & Akamai blocks on Render)
+# Import curl_cffi for Chrome TLS Fingerprint Impersonation
 try:
     from curl_cffi import requests as cffi_requests
     CURL_CFFI_AVAILABLE = True
@@ -33,6 +33,10 @@ class ScrapeReviews:
         self.driver = None
         self.session = None
         self._session_warmed = False
+
+        # Support optional proxy via environment variables for cloud hosts
+        self.proxy_url = os.environ.get("PROXY_URL") or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+        self.proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
 
     def _get_headers(self, referer="https://www.myntra.com/"):
         ua = random.choice(USER_AGENTS)
@@ -68,15 +72,19 @@ class ScrapeReviews:
         if self._session_warmed and self.session is not None:
             return self.session
 
-        self._log_status(status_callback, "🌐 Initializing TLS Chrome session & fetching Akamai security tokens...", "info")
+        self._log_status(status_callback, "🌐 Initializing TLS Chrome session & fetching security tokens...", "info")
         
         if CURL_CFFI_AVAILABLE:
             try:
-                self.session = cffi_requests.Session(impersonate="chrome124")
+                self.session = cffi_requests.Session(impersonate="chrome124", proxies=self.proxies)
             except Exception:
                 self.session = std_requests.Session()
+                if self.proxies:
+                    self.session.proxies = self.proxies
         else:
             self.session = std_requests.Session()
+            if self.proxies:
+                self.session.proxies = self.proxies
 
         headers = self._get_headers(referer="https://www.google.com/")
         try:
@@ -129,7 +137,7 @@ class ScrapeReviews:
 
         # Retry with direct standard requests if session failed
         try:
-            res = std_requests.get(url, headers=headers, allow_redirects=True, timeout=12)
+            res = std_requests.get(url, headers=headers, proxies=self.proxies, allow_redirects=True, timeout=12)
             elapsed = round(time.time() - start_time, 2)
             status_msg = f"HTTP {res.status_code} ({elapsed}s via Requests) -> {url[:60]}..."
             if res.status_code == 200 and len(res.text) > 3000:
@@ -162,6 +170,9 @@ class ScrapeReviews:
             options.add_argument('--disable-software-rasterizer')
             options.add_argument('--disable-blink-features=AutomationControlled')
             options.add_argument(f'--user-agent={random.choice(USER_AGENTS)}')
+
+            if self.proxy_url:
+                options.add_argument(f'--proxy-server={self.proxy_url}')
 
             chrome_bin = os.environ.get("CHROME_BIN")
             if not chrome_bin:

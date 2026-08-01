@@ -43,6 +43,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def load_sample_dataset():
+    """Load local data.csv sample dataset for demonstration"""
+    csv_path = os.path.join(os.path.dirname(__file__), "data.csv")
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        if not df.empty:
+            st.session_state["data"] = True
+            st.session_state["scrapped_data"] = df
+            st.rerun()
+
+
 def main():
     # Sidebar Configuration & Help
     with st.sidebar:
@@ -88,11 +99,16 @@ def main():
 
     st.session_state[SESSION_PRODUCT_KEY] = product_query
 
-    col_btn, _ = st.columns([1, 4])
+    col_btn, col_demo = st.columns([1, 1])
     with col_btn:
         scrape_clicked = st.button("🚀 Start Scraping", type="primary", use_container_width=True)
+    with col_demo:
+        demo_clicked = st.button("📂 Load Demo Dataset", use_container_width=True)
 
-    # Scraping Execution & Clean Progress Bar Only
+    if demo_clicked:
+        load_sample_dataset()
+
+    # Scraping Execution & Progress Bar
     if scrape_clicked:
         if not product_query or not product_query.strip():
             st.error("❌ Please enter a valid product query before starting.")
@@ -102,7 +118,6 @@ def main():
         progress_bar = st.progress(0)
 
         def ui_status_callback(msg: str, level: str = "info"):
-            # Update progress percentage if present in status
             if "%]" in msg:
                 try:
                     pct = int(msg.split("%]")[0].replace("[", "").strip())
@@ -127,7 +142,6 @@ def main():
                 st.session_state["scrapped_data"] = df
                 st.success(f"🎉 Successfully scraped {len(df)} customer review entries!")
 
-                # Attempt MongoDB Storage
                 try:
                     from src.cloud_io import MongoIO
                     mongo_io = MongoIO()
@@ -137,7 +151,14 @@ def main():
                     st.info("💾 Saved data to local CSV (`data.csv`)")
 
             else:
-                st.warning("⚠️ No products or reviews were found for this query. Try another search term.")
+                st.warning("⚠️ No products were returned for this query on the current host IP.")
+                st.info("""
+                💡 **Cloud Datacenter IP Notice**:
+                Myntra's CDN restricts direct automated requests originating from US/EU cloud datacenter IP ranges (such as Render/AWS).
+                - **To scrape live on cloud hosts**: Add a `PROXY_URL` environment variable in Render.
+                - **To run live directly**: Run the app locally on your machine where residential IPs work 100%.
+                - **Or click 'Load Demo Dataset' above** to instantly evaluate the dashboard and analytics!
+                """)
 
         except Exception as err:
             progress_text.empty()
@@ -156,7 +177,6 @@ def main():
         total_reviews = len(df)
         unique_prods = df["Product Name"].nunique()
         
-        # Calculate clean average price and rating
         try:
             prices = pd.to_numeric(df["Price"].astype(str).str.replace("₹", "").str.replace(",", "").str.strip(), errors="coerce")
             avg_price = f"₹{prices.mean():.2f}" if not prices.isna().all() else "N/A"
